@@ -32,7 +32,6 @@ from sklearn.metrics import (
     average_precision_score, precision_recall_curve, f1_score
 )
 from xgboost import XGBClassifier
-
 warnings.filterwarnings('ignore')
 pd.set_option('display.max_columns', 40)
 np.random.seed(42)
@@ -54,7 +53,6 @@ NOAA_TOKEN = os.environ.get('NOAA_TOKEN', '')
 if not NOAA_TOKEN:
     print('WARNING: NOAA_TOKEN not set. Weather download will be skipped.')
     print('  Get a free token at: https://www.ncdc.noaa.gov/cdo-web/token')
-
 # Thresholds
 DELAY_MIN_THRESHOLD = 15   # FAA standard: delayed if departure delay > 15 min
 LOW_THRESH          = 0.30
@@ -91,7 +89,6 @@ AIRPORT_NOAA = {
     'MDW': {'station':'725340-14819','lat':41.7868,'lon':-87.7522},
     'SLC': {'station':'725720-24127','lat':40.7884,'lon':-111.978},
 }
-
 print(f'Configuration loaded')
 print(f'  Delay threshold:    > {DELAY_MIN_THRESHOLD} minutes')
 print(f'  Risk LOW < {LOW_THRESH*100:.0f}%   MEDIUM {LOW_THRESH*100:.0f}-{MEDIUM_THRESH*100:.0f}%   HIGH >= {MEDIUM_THRESH*100:.0f}%')
@@ -154,27 +151,22 @@ def clean_flights(df):
     - Build merge keys for NOAA join: (Origin, merge_date, merge_hour)
     '''
     df = df.copy()
-
     # Parse dates
     df['FlightDate'] = pd.to_datetime(df['FlightDate'], errors='coerce')
     df = df.dropna(subset=['FlightDate', 'Origin', 'Dest'])
-
     # Extract departure hour from CRSDepTime (HHMM format: 1430 = 14:30)
     hhmm = df['CRSDepTime'].fillna(0).astype(int).astype(str).str.zfill(4)
     df['dep_hour'] = hhmm.str[:2].astype(int).clip(0, 23)
-
     # Numeric columns
     for col in ['DepDelay','DepDelayMinutes','Cancelled','Distance',
                 'WeatherDelay','NASDelay','CarrierDelay','LateAircraftDelay']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
     # Target variables
     # is_delayed = 1 if departure delay > 15 minutes (FAA standard)
     df['is_delayed']  = (df['DepDelay'] > 15).astype(int)
     df['is_canceled'] = (df['Cancelled'] == 1).astype(int)
-
-    # ── BTS weather proxy features (FAA-certified, no NOAA required) ──────────
+    # BTS weather proxy features (FAA-certified, no NOAA required)
     # These are official delay attributions reported by airlines to the FAA.
     # They capture weather impact on THIS flight as reported.
     # NOTE: We use these only as proxy weather features in the model.
@@ -183,33 +175,31 @@ def clean_flights(df):
     # Instead, they inform the historical_weather_delay_rate feature below.
     df['had_weather_delay'] = (df['WeatherDelay'] > 0).astype(int)
 
-    # Cancellation reason
+# Cancellation reason
     cancel_map = {'A': 'Carrier', 'B': 'Weather', 'C': 'NAS', 'D': 'Security'}
     if 'CancellationCode' in df.columns:
         df['cancel_reason'] = df['CancellationCode'].map(cancel_map).fillna('None')
 
-    # Rename for consistency
+# Rename for consistency
     df = df.rename(columns={'IATA_Code_Operating_Airline': 'carrier'})
     df['carrier'] = df['carrier'].str.strip()
 
-    # Merge keys
+# Merge keys
     df['merge_date'] = df['FlightDate'].dt.date
     df['merge_hour'] = df['dep_hour']
 
-    # Additional temporal features
+# Additional temporal features
     df['month']      = df['FlightDate'].dt.month
     df['day_of_week']= df['FlightDate'].dt.dayofweek  # 0=Mon, 6=Sun
 
-    # Filter to airports with NOAA station mapping
+# Filter to airports with NOAA station mapping
     df = df[df['Origin'].isin(set(AIRPORT_NOAA.keys()))].copy()
-
     print(f'Cleaned: {len(df):,} flights')
     print(f'  Delayed (>15 min): {df["is_delayed"].sum():,} ({df["is_delayed"].mean()*100:.1f}%)')
     print(f'  Canceled:          {df["is_canceled"].sum():,} ({df["is_canceled"].mean()*100:.1f}%)')
     print(f'  Airports:          {df["Origin"].nunique()}')
     print(f'  Carriers:          {sorted(df["carrier"].dropna().unique())}')
     return df
-
 flights_cleaned = clean_flights(flights_raw)
 flights_cleaned[['FlightDate','carrier','Origin','Dest','dep_hour',
                   'DepDelay','is_delayed','is_canceled']].head(5)
@@ -222,15 +212,12 @@ flights_cleaned[['FlightDate','carrier','Origin','Dest','dep_hour',
 # Test (holdout)	2024	Final evaluation — never touched during training
 # Temporal split — sort by date, split chronologically
 df_sorted = flights_cleaned.sort_values('FlightDate').reset_index(drop=True)
-
 train_mask = df_sorted['FlightDate'].dt.year.between(2018, 2022)
 val_mask   = df_sorted['FlightDate'].dt.year == 2023
 test_mask  = df_sorted['FlightDate'].dt.year == 2024
-
 df_train = df_sorted[train_mask].copy()
 df_val   = df_sorted[val_mask].copy()
 df_test  = df_sorted[test_mask].copy()
-
 print('Temporal split summary:')
 for label, df_split in [('Training (2018-2022)', df_train),
                          ('Validation (2023)',    df_val),
@@ -240,7 +227,6 @@ for label, df_split in [('Training (2018-2022)', df_train),
     else:
         print(f'  {label}: {len(df_split):,} flights | '
               f'delay rate: {df_split["is_delayed"].mean()*100:.1f}%')
-
 # If data is only 2024, do a 70/15/15 time-ordered split
 if len(df_train) == 0:
     print('\nOnly one year detected — using 70/15/15 time-ordered split')
@@ -256,29 +242,24 @@ if len(df_train) == 0:
 # Compute historical rates from TRAINING data only
 # These will be used as lookup tables for val/test rows.
 # They represent what the model 'knows' from historical patterns.
-
 carrier_delay_rates = (
     df_train.groupby('carrier')['is_delayed'].mean()
     .rename('carrier_delay_rate').reset_index()
 )
-
 origin_delay_rates = (
     df_train.groupby('Origin')['is_delayed'].mean()
     .rename('origin_delay_rate').reset_index()
 )
-
 route_delay_rates = (
     df_train.assign(route=df_train['Origin']+'_'+df_train['Dest'])
     .groupby('route')['is_delayed'].mean()
     .rename('route_delay_rate').reset_index()
 )
-
 # Historical weather delay rate by carrier + origin (proxy for weather exposure)
 weather_delay_rates = (
     df_train.groupby(['carrier','Origin'])['had_weather_delay'].mean()
     .rename('hist_weather_delay_rate').reset_index()
 )
-
 print('Historical delay rates computed from training data:')
 print(f'  Carrier rates:       {len(carrier_delay_rates)} carriers')
 print(f'  Origin rates:        {len(origin_delay_rates)} airports')
@@ -340,8 +321,6 @@ def download_noaa_lcd(station_id, start_date, end_date,
     except Exception as e:
         print(f'  NOAA LCD download failed ({station_id}): {e}')
         return None
-
-
 def clean_noaa_lcd(df):
     '''
     Clean raw NOAA LCD hourly data.
@@ -366,20 +345,15 @@ def clean_noaa_lcd(df):
         s = s.str.replace(r'[sS\*vVaA]+$', '', regex=True)      # quality flags
         s = s.str.replace(r'\|.*$', '', regex=True)              # pipe-delimited values
         df[col] = pd.to_numeric(s, errors='coerce')
-
-    # Keep only hourly (top-of-hour) observations
+# Keep only hourly (top-of-hour) observations
     df = df[df['DATE'].dt.minute == 0].copy()
-
-    # Forward-fill short gaps (up to 3 consecutive hours)
+# Forward-fill short gaps (up to 3 consecutive hours)
     num_cols = [c for c in df.columns if c.startswith('Hourly')]
     df[num_cols] = df[num_cols].ffill(limit=3)
-
-    # Merge keys
+# Merge keys
     df['merge_date'] = df['DATE'].dt.date
     df['merge_hour'] = df['DATE'].dt.hour
     return df
-
-
 def load_all_noaa(folder=NOAA_FOLDER):
     '''Load and concat all cached NOAA LCD CSVs.'''
     files = [f for f in os.listdir(folder) if f.endswith('.csv')]
@@ -397,7 +371,6 @@ def load_all_noaa(folder=NOAA_FOLDER):
     print(f'NOAA loaded: {len(df_noaa):,} hourly records | '
           f'{df_noaa["DATE"].min().date()} to {df_noaa["DATE"].max().date()}')
     return df_noaa
-
 
 # Download NOAA data for training airports (run once with your token)
 # Uncomment and add your token to download real NOAA data:
@@ -422,7 +395,6 @@ if df_noaa is None:
 # Features are divided into two groups:
 # Training features — used to train the model (no future values)
 # Post-flight features — WeatherDelay, ArrDelay etc. are excluded as model inputs because they are only known after the flight completes (would cause leakage in production)
-
 def merge_noaa(df_flights, df_noaa):
     '''Merge flight data with NOAA hourly observations on (Origin, date, hour).'''
     if df_noaa is None:
@@ -431,7 +403,6 @@ def merge_noaa(df_flights, df_noaa):
                     'HourlyWindSpeed','HourlyVisibility','HourlySeaLevelPressure']:
             df_flights[col] = np.nan
         return df_flights
-
     noaa_keep = ['Origin','merge_date','merge_hour',
                  'HourlyDryBulbTemperature','HourlyPrecipitation',
                  'HourlyWindSpeed','HourlyVisibility','HourlySeaLevelPressure']
@@ -440,8 +411,6 @@ def merge_noaa(df_flights, df_noaa):
     matched = df['HourlyWindSpeed'].notna().sum()
     print(f'  NOAA merge: {matched:,}/{len(df):,} rows matched ({matched/len(df)*100:.1f}%)')
     return df
-
-
 def build_features(df, carrier_rates, origin_rates, route_rates, weather_rates,
                    le_carrier=None, le_origin=None, le_dest=None, fit=False):
     '''
@@ -458,7 +427,7 @@ def build_features(df, carrier_rates, origin_rates, route_rates, weather_rates,
     '''
     df = df.copy()
 
-    # 1. Cyclical time encoding
+# 1. Cyclical time encoding
     df['hour_sin']    = np.sin(2*np.pi*df['dep_hour']/24)
     df['hour_cos']    = np.cos(2*np.pi*df['dep_hour']/24)
     df['month_sin']   = np.sin(2*np.pi*df['month']/12)
@@ -472,22 +441,20 @@ def build_features(df, carrier_rates, origin_rates, route_rates, weather_rates,
     df['is_winter']   = df['month'].isin([12,1,2]).astype(int)
     df['is_summer']   = df['month'].isin([6,7,8]).astype(int)
 
-    # 2. Historical delay rates (from training data lookups)
+# 2. Historical delay rates (from training data lookups)
     # These are legitimate 24-48hr features — they represent known historical patterns
     df['route'] = df['Origin'] + '_' + df['Dest']
     df = df.merge(carrier_rates, on='carrier', how='left')
     df = df.merge(origin_rates,  on='Origin',  how='left')
     df = df.merge(route_rates,   on='route',   how='left')
     df = df.merge(weather_rates, on=['carrier','Origin'], how='left')
-
-    # Fill unseen carriers/routes with global training mean
+# Fill unseen carriers/routes with global training mean
     global_mean = carrier_rates['carrier_delay_rate'].mean()
     df['carrier_delay_rate']    = df['carrier_delay_rate'].fillna(global_mean)
     df['origin_delay_rate']     = df['origin_delay_rate'].fillna(global_mean)
     df['route_delay_rate']      = df['route_delay_rate'].fillna(global_mean)
     df['hist_weather_delay_rate']= df['hist_weather_delay_rate'].fillna(0)
-
-    # 3. NOAA weather features (from LCD hourly, or NWS forecast)
+# 3. NOAA weather features (from LCD hourly, or NWS forecast)
     # HourlyWindSpeed is in mph (LCD standard units)
     df['noaa_wind_mph']   = pd.to_numeric(df.get('HourlyWindSpeed',  np.nan), errors='coerce')
     df['noaa_precip_in']  = pd.to_numeric(df.get('HourlyPrecipitation', np.nan), errors='coerce')
@@ -495,17 +462,17 @@ def build_features(df, carrier_rates, origin_rates, route_rates, weather_rates,
     df['noaa_temp_f']     = pd.to_numeric(df.get('HourlyDryBulbTemperature', np.nan), errors='coerce')
     df['noaa_press_inhg'] = pd.to_numeric(df.get('HourlySeaLevelPressure', np.nan), errors='coerce')
 
-    # Binary weather flags — documented thresholds:
-    # rain_flag:       precipitation > 0 inches
-    # high_wind_flag:  wind > 25 mph (FAA flow control advisory threshold)
-    # low_vis_flag:    visibility < 3 miles (IFR conditions)
-    # extreme_temp:    temperature > 95F or < 5F (de-icing / heat stress)
+# Binary weather flags — documented thresholds:
+# rain_flag:       precipitation > 0 inches
+# high_wind_flag:  wind > 25 mph (FAA flow control advisory threshold)
+# low_vis_flag:    visibility < 3 miles (IFR conditions)
+# extreme_temp:    temperature > 95F or < 5F (de-icing / heat stress)
     df['rain_flag']      = (df['noaa_precip_in'].fillna(0) > 0).astype(int)
     df['high_wind_flag'] = (df['noaa_wind_mph'].fillna(0) > 25).astype(int)  # mph threshold
     df['low_vis_flag']   = (df['noaa_vis_miles'].fillna(10) < 3).astype(int)
     df['extreme_temp']   = (df['noaa_temp_f'].fillna(60).abs() > 95).astype(int)
 
-    # Composite weather severity (0-10): usable even without NOAA (falls to 0)
+# Composite weather severity (0-10): usable even without NOAA (falls to 0)
     df['weather_severity'] = (
         df['rain_flag'] * 2.5
         + df['high_wind_flag'] * 2.5
@@ -513,16 +480,16 @@ def build_features(df, carrier_rates, origin_rates, route_rates, weather_rates,
         + df['extreme_temp'] * 2.0
     ).clip(0, 10)
 
-    # 4. Operational features
+# 4. Operational features
     df['distance'] = df['Distance'].fillna(df['Distance'].median() if 'Distance' in df.columns else 800)
     df['dist_bin'] = pd.cut(df['distance'],
                              bins=[0,500,1000,1500,2000,6000],
                              labels=[0,1,2,3,4]).astype(int)
 
-    # 5. Label-encode categoricals (avoids 50+ dummy columns)
-    # Label encoding is preferred over one-hot for tree-based models:
-    # - Avoids adding 50+ binary columns for airlines and airports
-    # - XGBoost handles label-encoded categoricals natively
+# 5. Label-encode categoricals (avoids 50+ dummy columns)
+# Label encoding is preferred over one-hot for tree-based models:
+# - Avoids adding 50+ binary columns for airlines and airports
+# - XGBoost handles label-encoded categoricals natively
     if fit:
         le_carrier = LabelEncoder().fit(df['carrier'].fillna('XX'))
         le_origin  = LabelEncoder().fit(df['Origin'].fillna('XX'))
@@ -538,8 +505,6 @@ def build_features(df, carrier_rates, origin_rates, route_rates, weather_rates,
     if fit:
         return df, le_carrier, le_origin, le_dest
     return df
-
-
 # Apply to all three splits
 print('Merging NOAA weather...')
 df_train = merge_noaa(df_train, df_noaa)
@@ -576,7 +541,6 @@ FEATURES = [
     'carrier_enc', 'origin_enc', 'dest_enc',
 ]
 FEATURES = [f for f in FEATURES if f in df_train.columns]
-
 print(f'\nFeature engineering complete: {len(FEATURES)} features')
 print(f'Features: {FEATURES}')
 
@@ -650,7 +614,6 @@ X_val   = df_val[FEATURES].fillna(0)   if len(df_val)   > 0 else X_train.iloc[:1
 y_val   = df_val['is_delayed']          if len(df_val)   > 0 else y_train.iloc[:100]
 X_test  = df_test[FEATURES].fillna(0)  if len(df_test)  > 0 else X_train.iloc[-100:]
 y_test  = df_test['is_delayed']         if len(df_test)  > 0 else y_train.iloc[-100:]
-
 print(f'Training: {len(X_train):,} | Validation: {len(X_val):,} | Test (holdout): {len(X_test):,}')
 
 # Class imbalance
@@ -664,7 +627,6 @@ print('\nTraining Logistic Regression (baseline)...')
 scaler = StandardScaler()
 X_train_sc = scaler.fit_transform(X_train)
 X_val_sc   = scaler.transform(X_val)
-
 lr = LogisticRegression(C=0.5, class_weight='balanced', max_iter=500, random_state=42, n_jobs=-1)
 lr.fit(X_train_sc, y_train)
 auc_lr = roc_auc_score(y_val, lr.predict_proba(X_val_sc)[:,1])
@@ -715,7 +677,6 @@ for name, auc in [('Logistic Regression', auc_lr),
 print('\nTraining cancellation model...')
 y_train_cancel = df_train['is_canceled']
 y_val_cancel   = df_val['is_canceled'] if len(df_val) > 0 else y_train_cancel.iloc[:100]
-
 rf_cancel = RandomForestClassifier(
     n_estimators=100, max_depth=10, class_weight='balanced',
     n_jobs=-1, random_state=42
@@ -723,7 +684,6 @@ rf_cancel = RandomForestClassifier(
 rf_cancel.fit(X_train, y_train_cancel)
 cancel_cal = CalibratedClassifierCV(rf_cancel, method='isotonic', cv=5)
 cancel_cal.fit(X_train, y_train_cancel)
-
 auc_cancel = roc_auc_score(y_val_cancel, cancel_cal.predict_proba(X_val)[:,1])
 print(f'  Cancellation model AUC (val): {auc_cancel:.4f}')
 
@@ -743,7 +703,6 @@ y_test_cancel = df_test['is_canceled'] if len(df_test) > 0 else y_train.iloc[-10
 auc_delay   = roc_auc_score(y_test, y_prob_delay)
 brier_delay = brier_score_loss(y_test, y_prob_delay)
 avg_prec    = average_precision_score(y_test, y_prob_delay)
-
 print('='*60)
 print('  2024 HOLDOUT TEST SET — COMPLETE METRIC TABLE')
 print('='*60)
@@ -761,11 +720,9 @@ best_thresh= thresholds_arr[best_idx]
 best_f1    = f1_scores[best_idx]
 print(f'  Optimal threshold (max F1): {best_thresh:.4f}')
 print(f'  F1 at optimal threshold:    {best_f1:.4f}')
-
 y_pred_opt = (y_prob_delay >= best_thresh).astype(int)
 print('\nClassification Report with Optimal Threshold:')
 print(classification_report(y_test, y_pred_opt, target_names=['On-Time','Delayed']))
-
 fig, axes = plt.subplots(2, 3, figsize=(20, 12))
 
 # 1. Confusion matrix (optimal threshold)
@@ -837,13 +794,11 @@ print('Computing SHAP values (may take 30-60 seconds)...')
 
 # Use 1,000 samples from test set for stable, reproducible SHAP summary plot
 X_shap = X_test.sample(n=min(1000, len(X_test)), random_state=42)
-
 explainer  = shap.TreeExplainer(xgb)
 shap_values = explainer.shap_values(X_shap)
 
 # Global explainability: Summary beeswarm plot
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
-
 plt.sca(ax1)
 shap.summary_plot(shap_values, X_shap, show=False, plot_size=None)
 ax1.set_title('Global SHAP Summary — Feature Impact on Delay Probability',
@@ -886,7 +841,6 @@ for feat, val in top5.items():
 # Find one high-risk and one low-risk flight for illustration
 high_risk_idx = np.where(y_prob_delay[X_test.index.isin(X_shap.index)] > 0.65)[0]
 low_risk_idx  = np.where(y_prob_delay[X_test.index.isin(X_shap.index)] < 0.15)[0]
-
 for label, idx_arr in [('HIGH-RISK', high_risk_idx), ('LOW-RISK', low_risk_idx)]:
     if len(idx_arr) == 0:
         continue
@@ -921,8 +875,6 @@ AIRPORT_COORDS = {
     'SEA':(47.4502,-122.309), 'SFO':(37.6213,-122.379),
     'EWR':(40.6925,-74.1687),
 }
-
-
 def get_nws_forecast(airport_code, hours_ahead=48):
     '''
     Fetch hourly weather FORECAST from NWS (National Weather Service).
@@ -964,8 +916,6 @@ def get_nws_forecast(airport_code, hours_ahead=48):
     except Exception as e:
         print(f'  NWS forecast failed for {airport_code}: {e}')
         return None
-
-
 def predict_24_48hr(upcoming_flights_df):
     '''
     Score upcoming flights 24-48 hours before departure.
@@ -986,7 +936,6 @@ def predict_24_48hr(upcoming_flights_df):
         fc = get_nws_forecast(ap, hours_ahead=72)
         if fc is not None:
             all_fc.append(fc)
-
     if all_fc:
         df_fc = pd.concat(all_fc, ignore_index=True)
         df = df.merge(df_fc, on=['Origin','merge_date','merge_hour'], how='left')
@@ -995,12 +944,10 @@ def predict_24_48hr(upcoming_flights_df):
         for col in ['HourlyWindSpeed','HourlyPrecipitation','HourlyVisibility',
                     'HourlyDryBulbTemperature','HourlySeaLevelPressure']:
             df[col] = np.nan
-
     df['had_weather_delay'] = 0
     df = build_features(df, carrier_delay_rates, origin_delay_rates,
                          route_delay_rates, weather_delay_rates,
                          le_carrier, le_origin, le_dest)
-
     X_live = df[FEATURES].fillna(0)
     df['delay_prob']  = final_delay_model.predict_proba(X_live)[:,1]
     df['cancel_prob'] = final_cancel_model.predict_proba(X_live)[:,1]
@@ -1008,7 +955,6 @@ def predict_24_48hr(upcoming_flights_df):
     combined = df['delay_prob'] * 0.5 + df['cancel_prob'] * 0.5
     df['risk_level'] = np.where(combined < LOW_THRESH, 'Low',
                          np.where(combined < MEDIUM_THRESH, 'Medium', 'High'))
-
     now = pd.Timestamp.utcnow().tz_localize(None)
     df['departure_dt']  = df['FlightDate'] + pd.to_timedelta(df['dep_hour'], unit='h')
     df['hours_until']   = (df['departure_dt'] - now).dt.total_seconds() / 3600
@@ -1016,7 +962,6 @@ def predict_24_48hr(upcoming_flights_df):
                             (df['risk_level'].isin(['Medium','High']))).astype(int)
     df['send_alert_24'] = (df['hours_until'].between(0,24)).astype(int)
     return df
-
 
 # FLIGHTS — matched to actual flight schedule
 # Exact times from the provided flight schedule image
@@ -1032,10 +977,8 @@ upcoming_demo = pd.DataFrame({
     'arr_time_str': ['2:01 PM',   '10:56 AM', '3:04 PM',  '9:00 AM',  '9:20 AM'],
     'Distance':     [1947,         740,         377,        862,        1090     ],
 })
-
 print('Running 24-48 hr prediction demo...')
 results = predict_24_48hr(upcoming_demo)
-
 print('\nFLIGHT PREDICTION SUMMARY:')
 print('='*90)
 risk_icons = {'Low': '[GREEN]', 'Medium': '[YELLOW]', 'High': '[RED]'}
@@ -1059,8 +1002,6 @@ REBOOKING_LINKS = {
     'NK': {'name':'Spirit Airlines',    'url':'https://www.spirit.com/manage',                                            'phone':'1-855-728-3555'},
     'F9': {'name':'Frontier Airlines',  'url':'https://www.flyfrontier.com/travel/my-trips/',                             'phone':'1-801-401-9000'},
 }
-
-
 def get_rebooking_options(carrier, risk_level, flight_num, origin, dest, dep_time_str, arr_time_str):
     '''Generate contextual rebooking options based on risk level.'''
     airline = REBOOKING_LINKS.get(carrier, {
@@ -1107,8 +1048,6 @@ def get_rebooking_options(carrier, risk_level, flight_num, origin, dest, dep_tim
                 'Check your travel insurance policy if applicable',
             ]
         }
-
-
 def build_alert(fl, window_hrs):
     '''Build full passenger alert with risk advice and rebooking options.'''
     prob_pct   = int(fl['delay_prob'] * 100)
@@ -1120,7 +1059,6 @@ def build_alert(fl, window_hrs):
     arr_time   = fl.get('arr_time_str', 'N/A')
     # FIX: strip timestamp portion — only keep YYYY-MM-DD
     date_str   = str(fl['FlightDate'])[:10]
-
     advice = {
         'Low':    'Your flight is on schedule. No action needed.',
         'Medium': 'Moderate delay risk. Monitor your airline app and allow extra time.',
@@ -1168,7 +1106,6 @@ def build_alert(fl, window_hrs):
         ),
     }
 
-
 # Print full passenger alerts with advice messages
 print('PASSENGER ALERT NOTIFICATIONS')
 print('='*70)
@@ -1186,7 +1123,6 @@ for _, row in results.iterrows():
     if row['risk_level'] in ('Medium', 'High'):
         print(f"  REBOOK: {alert['rebooking']['rebook_url']}")
         print(f"  PHONE:  {alert['rebooking']['phone']}")
-
 print(f"\n{'='*70}")
 print(f"  Total flights scored: {len(results)}")
 for lvl in ['High','Medium','Low']:
@@ -1205,7 +1141,6 @@ for lvl in ['High','Medium','Low']:
 # Passenger Self-Service — Check Your Flight Risk
 # Passengers can look up their specific flight to get personalized risk details
 # and rebooking options. In production this would power a web form or chatbot.
-
 def check_my_flight(flight_num):
     '''
     Look up a specific flight from the scored results.
@@ -1219,13 +1154,11 @@ def check_my_flight(flight_num):
         print(f"Flight {flight_num.upper()} not found in today's predictions.")
         print(f"Available flights: {list(results['flight_num'])}")
         return
-
     row    = match.iloc[0]
     fl     = row.to_dict()
     window = 48 if row.get('hours_until', 25) > 24 else 24
     alert  = build_alert(fl, window)
     rebook = alert['rebooking']
-
     dep_time  = fl.get('dep_time_str', f"{int(fl['dep_hour']):02d}:00")
     arr_time  = fl.get('arr_time_str', 'N/A')
     risk      = fl['risk_level']
@@ -1233,7 +1166,6 @@ def check_my_flight(flight_num):
     delay_pct = int(fl['delay_prob'] * 100)
     cancel_pct= int(fl.get('cancel_prob', 0) * 100)
     date_str  = str(fl['FlightDate'])[:10]
-
     print(f"\n{'='*65}")
     print(f"  FLIGHT RISK REPORT — {flight_num.upper()}")
     print(f"{'='*65}")
@@ -1248,7 +1180,6 @@ def check_my_flight(flight_num):
     print(f"  ACTION:  {rebook['action']}")
     print(f"")
     print(f"  {rebook['suggestion']}")
-
     if rebook.get('tips'):
         print(f"")
         print(f"  WHAT YOU CAN DO RIGHT NOW:")
@@ -1267,8 +1198,7 @@ def check_my_flight(flight_num):
         print(f"  {line}")
     print(f"  {'─'*60}")
 
-
-# ── Run for all 5 flights ─────────────────────────────────────────────────────
+# Run for all 5 flights
 print('PASSENGER SELF-SERVICE — INDIVIDUAL FLIGHT LOOKUP')
 print('='*65)
 print('Usage in your own code:  check_my_flight("AA123")')
@@ -1295,7 +1225,6 @@ user_flight_info = {
     'FlightDate': date,
     'dep_time': dep_time
 }
-
 print("\nFetching data and generating prediction...")
 _ = predict_single_flight(user_flight_info)
 
