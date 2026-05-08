@@ -63,6 +63,7 @@ os.makedirs(NOAA_FOLDER, exist_ok=True)
 # Airport → NOAA LCD station mapping
 # Source: NOAA ISD station catalog
 # Station format matches the Local Climatological Data (LCD) v1 API
+
 AIRPORT_NOAA = {
     'ATL': {'station':'722190-13874','lat':33.6407,'lon':-84.4277},
     'ORD': {'station':'725300-94846','lat':41.9742,'lon':-87.9073},
